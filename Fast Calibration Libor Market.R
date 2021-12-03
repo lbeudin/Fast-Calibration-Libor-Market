@@ -1,0 +1,666 @@
+
+# Last modification : 4 nov 2020
+
+#TD 4 - Presentation 
+# Fast Calibration in libor market environment 
+#Focus on the swaption price 
+
+
+#Calibration of swaption price with the  Levenberg-Marquart algorithm and study of its efficiency
+
+#database used from bloomberg - extraction of zerocoupon and swaption data
+
+#Tools to jauge the efficiency :
+# CPU efficiency in time 
+#Iteration 
+
+#the Parameters we want to estimate :
+# X = a b c d k theta epsi, rho
+
+#Personal results explained
+#comparison with the results of the author of the paper 
+#proposition of improvements 
+
+
+
+
+#Part 1 
+# Description Database used :
+# col 1 Swaption price
+#col 2 starting index - the index refers to the zerocoupon file ex M = 3m is the first index in the zerocoupon list , M=30y is the 50th index
+#col 3 index for final maturity N 
+#col 4 is the strike price
+#col 5 the real M in years
+#col 6 the real N in years
+#col 7 the weight
+#col 8 the bid price
+#col 9 the ask price
+#col J the the second part of the forward ; 2Y3Y the col J is the 3 data
+#col 11 is the details of the products
+#col 12 is the ticker
+#col 13 is the swaption name 
+
+#In this paper, we choose to calibrate on market swaptions prices rather
+#than on implied volatilities since we derived the analytical gradient of the swaption price.
+
+
+#Part 2 : Swaption Pricing 
+#The LIBOR Market Model relies on the modelling of the forward rates which are quantities directly observable on the interest rates market
+
+library(latexpdf)
+
+
+#This function take into parameters the Zerocoupon rate of the market and the associated maturities
+#and return the forward vector.
+#fast calibration Paper : (1)
+Forward_Rate<-function (zerocoupon, timevector)
+{
+  fwd = c(1:length(timevector));
+  fwd[1] = zerocoupon[1]
+  for(jrow in 2:length(timevector))
+  {
+    fwd[jrow] = 1/(timevector[jrow+1]-timevector[jrow])*(zerocoupon[jrow]/zerocoupon[jrow+1]-1)
+    
+  }
+  return(fwd) ;
+}
+
+
+#shifted Fwd Rate function to manage negative rates: 
+shifted_Fwd_Rate<-function(zerocoupon, jrow, timevector,delta)
+{
+  return(1/(timevector[jrow+1]-timevector[jrow])*(zerocoupon[jrow]/zerocoupon[jrow+1]-1)+delta);
+}
+
+
+#Libor risk leass measure 
+#is the index of the first forward rate that has not yet expired
+libor_risk_less_measure<-function(zerocoupon,jrow,timevector)
+{
+  denominator= 1;
+  for(i in 1:match(min(timevector))-1)
+  { 
+    denominator=denominator*zerocoupon[i];
+  }
+  return (zerocoupon[match(min(timevector))]/denominator)
+}
+
+
+
+sigma_i<-function(zerocoupon, delta, timevector,i,gamma)
+{
+  factor = 0;
+  
+  for(j in 1:i-1)
+  {
+    factor = factor + gamma[j]*(timevector[j+1]-timevector[j])*(shifted_Fwd_Rate(zerocoupon,j,timevector,delta))/(1+(timevector[j+1]-timevector[j])*Forward_Rate(zerocoupon,j,timevector));
+  }
+  
+  return(-factor);
+}
+
+#itt = i
+#nbpath = high number for a good approximation
+#simulation of brownian
+#Should be used to improve the model to calculate the rates  with heston model
+brownian=function(itt,nbpath)
+{
+  vect=0;
+  final=0;
+  x=seq(from=1/itt,to=1,by=1/itt);
+  for(j in 1:nbpath){
+    vect[1]=0
+    for(i in 2:itt){
+      vect[i]=rnorm(n=1,0,1/nbpath)+vect[i-1];
+    }
+    plot(x,vect,type='l',ylim=c(-0.5,0.5),col=j+1,main= "Test Simulation Series Heston model");
+    par(new=T);
+    #final[j]=vect[itt]*vect[itt];
+  }
+  #return(sum(final)/number);
+  #dev.off()
+}
+
+
+
+# Part 2.1 Swap Dynamic
+
+#return the rate in a fwd date
+fwd_swap_rate = function (zerocoupon,N,M,timevector,dep)
+{
+  denominator= 0;
+  #calculating swap annuities 
+  for(i in N:M-1)
+  { 
+    denominator=denominator+ (timevector[i+1]-timevector[i])*zerocoupon[i+1];
+  }
+  return(zerocoupon[M]-zerocoupon[N])/denominator;
+}
+
+
+
+#shifted swap rate with delta not used in the next codes 
+shifted_swap_rate<-function(zerocoupon,N,M,timevector,delta)
+{
+  denominator= 0;
+  sum =0;
+  #calculating swap annuities
+  for(i in N:M-1)
+  { sum = sum + (timevector[i+1]-timevector[i])*zerocoupon[i+1]*shifted_Fwd_Rate(zerocoupon,i,timevector,delta)
+  denominator=denominator+ (timevector[i+1]-timevector[i])*zerocoupon[i+1];
+  }
+}
+
+#alphaj(t) = deltaTjP(t;Tj+1)/BS(t)
+alpha = function(zerocoupon,timevector,M,N,jrow)
+{
+  denominator= 0
+  for(i in M:N-1)
+  { 
+    denominator=denominator+ (timevector[i+1]-timevector[i])*zerocoupon[i+1];
+  }
+  return(zerocoupon[jrow+1]*(timevector[jrow+1]-timevector[jrow]))/denominator
+}
+
+psi = function(e,k,timevector,zerocoupon,delta,rho,gamma,N,M)
+{
+  start =1
+  start2 =0
+  for(i in N:(M-1) )
+  {
+    for( j in N:i)
+    {
+      start2 = start2 + (timevector[j+1]-timevector[j])*shifted_Fwd_Rate(zerocoupon,j,timevector,delta)/(1+(timevector[j+1]-timevector[j])*(shifted_Fwd_Rate(zerocoupon,j,timevector,delta)-delta))
+    }
+    
+    start =start+(e/k)*rho[i]*norm(t(gamma))*alpha(zerocoupon,timevector,N,M,i)*start2
+    start2=0
+  }
+  return(start)
+}
+
+#approximated shifted swap rate: Heston Model
+shifted_heston=function(e,k,alpha,tvect,zc,delta,rho,gamma,n,m)
+{
+  
+}
+#stochastic pocesss
+v_heston_11=function(e,k,alpha,tvect,zc,delta,rho,gamma,n,m,theta)
+{
+  return (k*(theta-psi(e,k,alpha,tvect,zc,delta,rho,gamma,n,m)))
+}
+
+#beta = B(j-k+1) vector inter forward relation ??
+gamma=function(Tj,Tk,beta,a,b,c)
+{
+  return (((a+b*(Tj-Tk))*exp(-c*(Tj-Tk))+d)*beta)
+}
+
+
+#Swaption Price
+swaption=function(parameters,start,strike,N,M)
+{
+  B=0
+  for(i in N:M-1)
+  { #zerocoupon T=0
+    B=B+ (timevector[i+1]-timevector[i])*zerocoupon[i+1];
+  }
+  
+  
+}
+
+
+
+
+
+#B
+
+B = function (zerocoupon,timevector,start,M,N)
+{
+  sumB=0
+  N=N-1
+  for(i in M:N)
+  { 
+    tt=(timevector[i+1]-timevector[i])
+    sumB=sumB+(timevector[i+1]-timevector[i])*zerocoupon[i+1]
+  }
+  return(sumB)
+}
+
+inter_FWD=function(zerocoupon,timevector)
+{
+  
+  #fwd = Forward_Rate(zerocoupon, timevector)
+  #matrix = matrix(nrow=length(fwd),ncol=length(fwd))
+  #for(i in 1:length(fwd))
+  #{
+  #  matrix[,i] = fwd
+  #}
+  
+  tabl =read.csv('auto_EU_AAA.csv',header =FALSE,sep = ';')
+  return (cor(t(tabl), method = c("pearson")))
+  
+  #return (acf(tabl,plot=FALSE))
+}
+
+
+#PS1
+# X = a b c d k theta epsi, rho
+#phi
+#dep not use
+phi =function(X,dep,z,M,N,timevector,zerocoupon,weight)
+{
+  A=0
+  B=0
+  g=0
+  taux = 0
+  
+  a=X[1]
+  b=X[2]
+  c = X[2]
+  delta= X[4]
+  k =X[5]
+  theta =X[6]
+  epsilon =X[7]
+  rho = X[8]
+  inter_fwd=inter_FWD(zerocoupon,timevector)
+  
+  #according to the paper it should always be 0 ?? TBC
+  Xmn = log((fwd_swap_rate(zerocoupon,M,N,timevector,dep)+delta)/(fwd_swap_rate(zerocoupon,M,N,timevector,dep)+delta))
+  gam=rep(0,length.out=length(inter_fwd[,1]))
+  rhom = 0
+  for(i in M:(N)) 
+  {
+    gamma = (a+b*taux)*exp(-c*taux)*inter_fwd[,i]
+    rho_vect = rho/(sqrt(length(inter_fwd[,i]))*norm(t(gamma))*sum(gamma))
+    gam = gam +c(weight[i]*t(gamma))
+    rhom = rhom+ weight[i]*norm(t(gamma))*rho_vect
+    
+  }
+  lambda = norm(t(gam))
+  rho_ = 1/lambda*rhom
+  
+  for(i in 1:(M-1))
+  {
+   if(i>0)
+     {
+    taux = timevector[i+1]-timevector[i]
+    alph = alpha(zerocoupon,timevector,M,N, i)
+    gamma = (a+b*taux)*exp(-c*taux)*inter_fwd[,i]
+    
+    
+    start = 1
+    start2 =0
+    for(l in M:(N-1) )
+    {
+      for( j in M:l)
+      {
+        start2 = start2 + (timevector[j+1]-timevector[j])*shifted_Fwd_Rate(zerocoupon,j,timevector,delta)/(1+(timevector[j+1]-timevector[j])*(shifted_Fwd_Rate(zerocoupon,j,timevector,delta)-delta))
+      }
+      start =start+(epsilon/k)*rho/(sqrt(length(inter_fwd[,l]))*norm(t(gamma))*sum(gamma))*norm(t(gamma))*alpha(zerocoupon,timevector,N,M,l)*start2
+      start2=0
+    }
+    psi =start
+    start =0
+    u = k * psi-rho_*epsilon*lambda*z
+    vol = sqrt(abs(u^2-lambda^2*epsilon^2*(z^2-2)))
+    
+    g = (u+vol-epsilon^2*zerocoupon[i])/(u-vol-epsilon^2*zerocoupon[i])
+    t1 =(k*theta/(epsilon^2))
+    t2 = (u+vol)*(taux)
+    t3=2*log(abs((1-g*exp(vol*(taux)))))
+    t4 = (1-g)
+    t5 = (u+vol-epsilon^2*zerocoupon[i])
+    t6 = (1-exp(vol*(timevector[i+1]-timevector[i])))
+    t7 = (epsilon^2*(1-g*exp(vol*(timevector[i+1]-timevector[i]))))
+    
+    A = A + (k*theta/(epsilon^2))*((u+vol)*(taux)-2*log(abs((1-g*exp(vol*(taux)))))/(1-g))
+    B = B + (u+vol-epsilon^2*zerocoupon[i])*(1-exp(vol*(timevector[i+1]-timevector[i])))/(epsilon^2*(1-g*exp(vol*(timevector[i+1]-timevector[i]))))
+   }
+  }
+  return(exp(A+B+Xmn*z))
+}
+
+
+PS1 =function(X,rate,dep,strike,M,N,timevector,zerocoupon,weight)
+{
+  z= 1i 
+  d = 0
+  d1 =0
+  d2=0
+  trapeze =0
+  trapeze2 =0
+  aire =0
+  u =0.0001
+  delta = X[4]
+  
+  while(u<1000000)
+  { 
+    test = phi(X,dep,u,M,N,timevector,zerocoupon,weight)
+  
+    d = (exp(-z*(u*log((strike+delta)/(rate+delta))))*phi(X,dep,u,M,N,timevector,zerocoupon,weight)/(z*u))
+    d1 = exp(-z*(u+0.5)*log((strike+delta)/(rate+delta)))*phi(X,dep,u+0.5,M,N,timevector,zerocoupon,weight)/(z*(u+0.5))
+    d2 = exp(-z*(u+1)*log((strike+delta)/(rate+delta)))*phi(X,dep,u+1,M,N,timevector,zerocoupon,weight)/(z*(u+1))
+    
+    trapeze = 0.5*min(Re(d),Re(d1)) + (max(Re(d),Re(d1))-min(Re(d),Re(d1)))*0.5/2
+    
+    d1 = exp(-z*(u+0.5)*log((strike+delta)/(rate+delta)))*phi(X,dep,u+0.5,M,N,timevector,zerocoupon,weight)/(z*(u+0.5))
+    trapeze2 = 0.5*min(Re(d2),Re(d1)) + (max(Re(d2),Re(d1))-min(Re(d2),Re(d1)))*0.5/2
+    
+    if( trapeze>0.0000001&& trapeze2>0.0000001)
+    {
+      aire = trapeze+trapeze2
+    }
+    else 
+    {
+      u =1000000
+    }
+    u=u+1
+  }
+  aire = trapeze+trapeze2
+  return (0.5+1/pi * aire)
+}
+
+
+#PS2
+#Integrale ?? 
+PS2 =function(X,rate,dep,strike,M,N,timevector,zerocoupon,weight)
+{
+  z= 1i 
+  d=0
+  d1=0
+  d2=0
+  trapeze=0
+  trapeze2=0
+  aire =0
+  u =0.001
+  delta = X[3]
+  
+  while(u<1000)
+  { 
+    d = (exp(-z*(u*log((strike+delta)/(rate+delta))))*phi(X,dep,u-z,M,N,timevector,zerocoupon,weight)/(z*u))
+    d1 = exp(-z*(u+0.5)*log((strike+delta)/(rate+delta)))*phi(X,dep,u+0.5-z,M,N,timevector,zerocoupon,weight)/(z*(u+0.5))
+    d2 = exp(-z*(u+1)*log((strike+delta)/(rate+delta)))*phi(X,dep,u+1-z,M,N,timevector,zerocoupon,weight)/(z*(u+1))
+    
+    trapeze = 0.5*min(Re(d),Re(d1)) + (max(Re(d),Re(d1))-min(Re(d),Re(d1)))*0.5/2
+    trapeze2 = 0.5*min(Re(d2),Re(d1)) + (max(Re(d2),Re(d1))-min(Re(d2),Re(d1)))*0.5/2
+    
+    if( trapeze>0.00001&& trapeze2>0.00001)
+    {
+      aire = trapeze+trapeze2
+    }
+    
+    else 
+    {
+      u =1000000
+    
+    }
+    u=u+1
+  }
+  aire = trapeze+trapeze2
+  return (0.5+1/pi * aire)
+}
+
+
+#Swaption price
+# In the paper : (6)
+PS=function(X,dep,strike,M,N,timevector,zerocoupon,weight) # (6)
+{
+  delta = X[3]
+  #be careful I inverse N and M  in the swap rate formula
+  rate =   fwd_swap_rate(zerocoupon,M,N,timevector,dep)
+  b= B(zerocoupon,timevector,dep,M,N)
+  return(b*((rate+delta)*PS1(X,rate,dep,strike,M,N,timevector,zerocoupon,weight)-(strike+delta)*PS2(X,rate,dep,strike,M,N,timevector,zerocoupon,weight)))
+}
+
+
+fe = function(X,strike,sumWeight,PSMarket,M,N,timevector,zerocoupon,weight,w)
+{
+  return(sqrt(w/sumWeight)*(PS(X,0,strike,M,N,timevector,zerocoupon,weight)-PSMarket/PSMarket))
+}
+
+Fe = function(X,weight,strike,sumWeight,PSMarket,M,N,timevector,zerocoupon,w)
+{
+  return(0.5*norm(fe(X,strike,sumWeight,PSMarket,M,N,timevector,zerocoupon,weight,w))^2)
+}
+
+
+jacobienne=function(X,fct,nbparameters,d,weight,strike,sumWeight,PSMarket,M,N,timevector,zerocoupon)
+{
+  a=c(X)
+  vect= matrix(nrow=length(X),ncol=length(strike))
+  p=d
+  for(j in 1:length(strike))
+  {
+  for(i in 1:length(X))
+  {
+  
+    a[i] = a[i]+d
+    b=fct(a,strike[j],sumWeight,PSMarket[j],M[j],N[j],timevector,zerocoupon,weight,weight[j])
+    c= fct(X,strike[j],sumWeight,PSMarket[j],M[j],N[j],timevector,zerocoupon,weight,weight[j])
+    vect[i,j] =(b-c)/d
+    a[i] = a[i]-d
+  }
+  }
+  return(vect)
+}
+
+
+
+
+#Levenberg-Maquart algorithm
+LVM=function(X0,f,eps1,eps2,eps3,kmax,nbparameters,weight,strike,PSMarket,M,N,timevector,zerocoupon)
+{
+  k=0
+  v=2
+  #taux is M
+  taux=timevector[M]
+  sumWeight = sum(weight)
+  J =jacobienne(X0,f,nbparameters,0.001,weight,strike,sumWeight,PSMarket,M,N,timevector,zerocoupon)
+  
+  test = as.matrix(t(J))
+  A = productmatrix(J,t(J))
+    #matrix((t(c(J))),nrow=length(X0),ncol=length(strike))*matrix(c(J),nrow=length(strike),ncol=length(X0))
+    #t(J)*J #matrix( (t(J)),nrow=length(X0),ncol=length(strike))*matrix(J,nrow=length(strike),ncol=length(X0))
+  
+ 
+  funct= matrix(nrow=length(strike),ncol=1)
+  for(i in 1:length(strike))
+  {
+    funct[i] = f(X0,strike[i],sumWeight,PSMarket[i],M[i],N[i],timevector,zerocoupon,weight,weight[i])
+  }
+ 
+  
+  FX0 = 0.5*norm((funct))^2
+  G =  productmatrix(J,funct)
+
+  u=1
+  X =X0
+  while(k<kmax&&(FX0>eps1||norm(G,type="I")>eps2)&&abs(sum(A))>0)
+  {
+    test = solve(A+taux*max(diag(A))*diag(nbparameters))
+    d=productmatrix(test,-G)
+    obs=eps3^2*norm(t(X))^2
+    obs2 =norm(d)^2
+    if(norm(d)^2<eps3^2*norm(t(X))^2||obs2>10000000)
+    {
+      kmax = k
+    }
+    else {
+      
+      L = 0.5*norm(funct+productmatrix(t(J),d))^2
+      L0 = 0.5*norm(funct)^2
+      X =X+d
+      
+      J =jacobienne(X,f,nbparameters,0.001,weight,strike,sumWeight,PSMarket,M,N,timevector,zerocoupon)
+      for(i in 1:length(strike))
+      {
+        funct[i] = f(X,strike[i],sumWeight,PSMarket[i],M[i],N[i],timevector,zerocoupon,weight,weight[i])
+      }
+      
+      FX=FX0
+      FX0 = 0.5*norm(funct)^2
+      
+      if( FX-FX0>0 && L0-L>0 )
+      {
+        n = (FX-FX0)/(L0-L) #measure how good L approximation is VS F, if n is high good
+        A =  productmatrix(J,t(J))
+        G = productmatrix(J,funct)
+        u = u*max(1/3,1-(2*n-1)^3) #is decreased in order to imitate the Gauss-Newton algorithm behaviour
+        v=2
+      }
+      else{
+        u=u*v #increased in order to imitate the behavior of the steepest descent
+        v=2*v
+      }
+    }
+    k=k+1
+  }
+  test = c(k)
+  return (c(X,test))
+}
+productmatrix=function(mat1,mat2)
+{
+  sum = 0
+  matrix = matrix(nrow=nrow(mat1),ncol=ncol(mat2))
+  for(i in 1:nrow(mat1))
+  {
+    for(j in 1:ncol(mat2))
+    {
+      for (k in 1:ncol(mat1))
+      {
+        
+        sum = sum + mat1[i,k]*mat2[k,j]
+      }
+      matrix[i,j] = sum
+      sum =0
+    }
+  }
+  return (matrix)
+}
+
+#read CSV that have zerocoupon and time vector
+#read another csv with swaption price from market M start and N maturity and strike
+# calculate weights
+testfunct = function()
+{
+  #Value to calibrate :
+  # X = a b c d k theta epsi, rho
+  #rho should be in -1 and 1 is a correlation factor
+  X = c(1,1,1,1,2,2,1,1)
+  
+  #test de brownian pour implementer l'heston model:
+  brownian(100,50)
+  
+  
+  tabl2 =read.csv('ZC_EU_tripleA.csv',header =FALSE,sep = ';')
+  
+  timevector2 =tabl2[,1]
+  zerocoupon2 =c(tabl2[,2])
+  #zerocoupon =c(0.3,0.4,0.6)
+  #timevector =c(1,2,3)
+  
+  print("Data From BBG")
+  par(new=F) 
+  plot(timevector2 , zerocoupon2,xlab= "Time in years", ylab= "Zero coupon EU - AAA",main= "Yield curve of Zero coupon Bond EU zone AAA")
+  
+  tabl =read.csv('ZC_EU_tripleA2.csv',header =FALSE,sep = ';')
+  timevector =tabl[,1]
+  zerocoupon =c(tabl[,2])
+  
+  swaptiondatamat = read.csv('Swaptionn.csv',header =FALSE,sep = ';')
+  
+  swaptiondata=swaptiondatamat[,1]
+  strike=swaptiondatamat[,4]
+  startM=swaptiondatamat[,2] #ne devrait pa etre des annees mais des indices qui referent a une case dans la base de donnee en annee
+  startN=swaptiondatamat[,3] 
+  
+  weight=c(tabl[,4])
+  timevector=tabl[,1]
+  zerocoupon=c(tabl[,2])
+  
+  
+  # objectives nb itteration  in LM algo
+  #average CPU time
+  #nb call F/f
+  
+  
+  #deals by deals 
+  vect= c(length(strike))
+  itt= c(length(strike))
+  
+
+    
+  ### Swaption Calibration Results
+  
+  for(i in 1:length(strike))
+  {
+      
+    strike0 = c(strike[i])
+    startM0 = c(startM[i])
+    startN0 = c(startN[i])
+    swaptiondata0 = c(swaptiondata[i])
+    print(paste('Swaption ',i))
+    print('Rate :')
+    print(fwd_swap_rate(zerocoupon,startM0,startN0,timevector,0))
+    funct = PS(X,dep,strike0,startM0,startN0,timevector,zerocoupon,weight) 
+    print('Swaption :')
+    print(funct)
+    start_time <- Sys.time()
+    X0=LVM(X,fe,0.001,0.001,0.001,500,8,weight,strike0,swaptiondata0,startM0,startN0,timevector,zerocoupon)
+    end_time <- Sys.time()
+    timev = (end_time-start_time)
+    vect[i]=timev
+    print('Time to calibrate :')
+    print(timev)
+    print('Itteration :')
+    itt[i] =X0[9]
+    print(X0[9])
+    print('Vector calibrated result :')
+    print(X0)
+    print('')
+  }
+  
+  print(vect)
+  boxplot(vect,data=vect, main="Time CPU",
+          xlab="LM-Opti", ylab="Time CPU")
+  
+  boxplot(itt,data=itt, main="Iteration",
+          xlab="LM-Opti", ylab="Nombre Itterations")
+  
+  
+  
+  #the classic LM algorithm does not handle bound and inequality constraints. However, it can be extended to do so. 
+  #the condition to condider to improve my algorithm
+  #check the feller condition : 2Ktheta>epsi^2
+  
+  #Calibration results : The algorithm seams extremly instable and has been able to calibrate only one swaption 
+  #we should now consider the LM algorithm bounded. 
+  #nonetheless for 5 iteration the time is not disappointingd as I used approximation of the jacobian and also of the integrale of the swaption price. 
+  #We have for our swaption 5 itterations with 14s CPU while the author of the article get 15 itteration and the time is 49s CPU
+  
+  #the Feller condition is not ensure
+  
+  # instabilities when some parameters are near from 0 :
+  # the author :Indeed, we experienced numerical instabilities
+  #when some parameters equal zero or are very close to zero. For instance if the speed
+  #reversion parameter k or the volatility of volatility become almost zero, the behavior of
+  #the model is pathologic
+  #they gave bound to their vector -> I didn't put bound, I stopped the algo when the norm of the vector d in the LM algo was too high 
+  
+  
+  #What they did to solve this issue :
+  #we draw randomly 100 initial parameter starting values
+  #between LowB and UpperB that satisfy the Feller condition and we perform the calibration
+  #for each described method starting from each of these initial guess. 
+  
+  
+  
+  #Create the accuracy of the model and reality test it
+
+  
+  
+}
+testfunct()
+
+
